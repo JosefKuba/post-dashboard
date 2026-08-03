@@ -27,6 +27,38 @@ def to_int(v):
     try: return int(float(s))
     except Exception: return 0
 
+def to_percent_int(v):
+    """Parse gender/ratio cells into integer percentage points (e.g. 14 for 14%).
+
+    Supports common Google Sheets forms:
+    - formatted percent raw value 0.14  → 14
+    - text "14%" / "14％"               → 14
+    - plain number 14                   → 14
+    """
+    if v is None or v == "":
+        return 0
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        f = float(v)
+        if 0 < abs(f) < 1:
+            return int(round(f * 100))
+        return int(round(f))
+    s = norm(v).replace(",", "").replace("，", "").strip()
+    if not s:
+        return 0
+    has_pct = "%" in s or "％" in s
+    s = s.replace("%", "").replace("％", "").strip()
+    try:
+        f = float(s)
+    except Exception:
+        return 0
+    if has_pct:
+        return int(round(f))
+    if 0 < abs(f) < 1:
+        return int(round(f * 100))
+    return int(round(f))
+
 def sheet_id_from_url(url):
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url or "")
     return m.group(1) if m else norm(url)
@@ -214,7 +246,8 @@ def sync_rank_for_page(gc, page):
     ws = open_ws(gc, page["sheet_url"], RANK_SHEET_NAME)
     # 新版“帖文排行”列结构：
     # A 帖文ID | B 帖文链接 | C 引流日期 | D 引流
-    # E-G 预留/忽略 | H 男 | I 女 | J 邀约 | K 上线 | L 交教会
+    # E-G 预留/忽略 | H 男(比例%) | I 女(比例%) | J 邀约 | K 上线 | L 交教会
+    # 男/女在表格中为百分比（如 14%、0.14），入库为整数百分点（14）。
     # 答题 answers 和得人 gained 不从表格读取，固定存为 0。
     rows = get_values(ws, f"A{RANK_START_ROW}:L", value_render_option="UNFORMATTED_VALUE", date_time_render_option="SERIAL_NUMBER")
     count = 0
@@ -227,8 +260,8 @@ def sync_rank_for_page(gc, page):
                 post_link = norm(row[1]) if len(row) > 1 else ""
                 lead_date = parse_google_date(row[2] if len(row) > 2 else "")
                 leads = to_int(row[3] if len(row) > 3 else "")
-                male = to_int(row[7] if len(row) > 7 else "")
-                female = to_int(row[8] if len(row) > 8 else "")
+                male = to_percent_int(row[7] if len(row) > 7 else "")
+                female = to_percent_int(row[8] if len(row) > 8 else "")
                 answers = 0
                 invites = to_int(row[9] if len(row) > 9 else "")
                 online = to_int(row[10] if len(row) > 10 else "")
