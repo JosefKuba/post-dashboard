@@ -58,9 +58,10 @@ class QueryTextBody(BaseModel):
 
 def default_ui():
     return {
-        "version":"v11",
+        "version":"v12",
+        "columnsLayoutVersion": 15,
         "view":"table",
-        "fontSize":13,"rowHeight":42,"imageSize":72,"textLimit":80,"drawerWidth":560,
+        "fontSize":13,"rowHeight":42,"imageSize":72,"textLimit":80,"drawerWidth":520,
         "showGrid":True,"headerBg":"#f8fafc","headerColor":"#111827","textColor":"#111827","gridColor":"#e5e7eb","stripeBg":"#ffffff","hoverBg":"#eef6ff",
         "globalMinLeads":2,"adminMinLeads":{},"genderMode":"count_percent",
         "landscape":{"ratio":"16/9","avatar":True,"dates":True,"gender":True,"metrics":True,"engagement":True,"pageType":True,"summary":True,"buttons":True},
@@ -462,6 +463,20 @@ def _resolve_existing_post_ids(candidates: list[str]) -> set[str]:
     return {r["post_id"] for r in rows if r.get("post_id")}
 
 
+def _query_response(rows: list[dict], raw: int, recognized: int, unmatched: list[str]) -> dict:
+    return {
+        "total": len(rows),
+        "rows": rows,
+        "unmatched": unmatched,
+        "stats": {
+            "raw": raw,
+            "recognized": recognized,
+            "returned": len(rows),
+            "unmatched": len(unmatched),
+        },
+    }
+
+
 @app.post("/api/query/by-post-id")
 def query_by_post_id(body: QueryTextBody, x_user_token: Optional[str] = Header(default=None)):
     """按帖文ID批量查询；输入无 # 时自动补上。"""
@@ -473,12 +488,13 @@ def query_by_post_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
         if cell:
             recognized_inputs.append(cell)
 
-    # 每个输入扩展为带/不带 # 的候选，优先匹配库中已有写法
+    if not recognized_inputs:
+        return _query_response([], len(raw_lines), 0, [])
+
     all_candidates: list[str] = []
     input_to_variants: list[list[str]] = []
     for raw in recognized_inputs:
         variants = _post_id_variants(raw)
-        # 查询时保证至少尝试补 # 后的形式
         if variants and not any(v.startswith("#") for v in variants):
             variants.append("#" + variants[0])
         input_to_variants.append(variants)
@@ -486,29 +502,22 @@ def query_by_post_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
 
     existing = _resolve_existing_post_ids(all_candidates)
     resolved_ids: list[str] = []
-    for variants in input_to_variants:
-        # 优先用带 # 且存在的；否则用任意存在的；都没有则用补 # 后的首选（结果会被存在性过滤）
-        preferred = None
-        for v in variants:
-            if v in existing:
-                preferred = v
-                break
-        if preferred is None and variants:
-            # 优先选带 # 的变体作为“查询 ID”
-            preferred = next((v for v in variants if v.startswith("#")), variants[0])
+    unmatched: list[str] = []
+    for raw, variants in zip(recognized_inputs, input_to_variants):
+        preferred = next((v for v in variants if v in existing), None)
         if preferred:
             resolved_ids.append(preferred)
+        else:
+            unmatched.append(raw)
 
     rows = _posts_by_ordered_ids(resolved_ids, body.admin, body.page_code, body.limit)
-    return {
-        "total": len(rows),
-        "rows": rows,
-        "stats": {
-            "raw": len(raw_lines),
-            "recognized": len(recognized_inputs),
-            "returned": len(rows),
-        },
-    }
+    returned_ids = {r.get("post_id") for r in rows if r.get("post_id")}
+    # 库中有记录但被管理员/专页过滤掉的，也计入未命中
+    for raw, variants in zip(recognized_inputs, input_to_variants):
+        preferred = next((v for v in variants if v in existing), None)
+        if preferred and preferred not in returned_ids and raw not in unmatched:
+            unmatched.append(raw)
+    return _query_response(rows, len(raw_lines), len(recognized_inputs), unmatched)
 
 
 @app.post("/api/query/by-post-link")
@@ -525,9 +534,8 @@ def query_by_post_link(body: QueryTextBody, x_user_token: Optional[str] = Header
             links.append(link)
 
     if not links:
-        return {"total": 0, "rows": [], "stats": {"raw": len(raw_lines), "recognized": 0, "returned": 0}}
+        return _query_response([], len(raw_lines), 0, [])
 
-    # 同时匹配去尾斜杠与带尾斜杠
     link_set: list[str] = []
     seen_l: set[str] = set()
     for lk in links:
@@ -555,7 +563,6 @@ def query_by_post_link(body: QueryTextBody, x_user_token: Optional[str] = Header
         """,
         {"links": link_set, "norm_links": norm_links},
     )
-    # 按输入链接顺序映射 post_id
     link_to_posts: dict[str, list[str]] = {}
     for r in found:
         pid = r.get("post_id") or ""
@@ -568,23 +575,26 @@ def query_by_post_link(body: QueryTextBody, x_user_token: Optional[str] = Header
 
     ordered_ids: list[str] = []
     seen_p: set[str] = set()
+    unmatched: list[str] = []
     for lk in links:
         key = lk.rstrip("/")
-        for pid in link_to_posts.get(key, []):
+        pids = link_to_posts.get(key, [])
+        if not pids:
+            unmatched.append(lk)
+            continue
+        for pid in pids:
             if pid not in seen_p:
                 seen_p.add(pid)
                 ordered_ids.append(pid)
 
     rows = _posts_by_ordered_ids(ordered_ids, body.admin, body.page_code, body.limit)
-    return {
-        "total": len(rows),
-        "rows": rows,
-        "stats": {
-            "raw": len(raw_lines),
-            "recognized": len(links),
-            "returned": len(rows),
-        },
-    }
+    returned_ids = {r.get("post_id") for r in rows if r.get("post_id")}
+    for lk in links:
+        key = lk.rstrip("/")
+        pids = link_to_posts.get(key, [])
+        if pids and not any(pid in returned_ids for pid in pids) and lk not in unmatched:
+            unmatched.append(lk)
+    return _query_response(rows, len(raw_lines), len(links), unmatched)
 
 
 @app.post("/api/query/by-lead-id")
@@ -599,9 +609,8 @@ def query_by_lead_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
             items.append(parsed)
 
     if not items:
-        return {"total": 0, "rows": [], "stats": {"raw": len(raw_lines), "recognized": 0, "returned": 0}}
+        return _query_response([], len(raw_lines), 0, [])
 
-    # VALUES 批量配对匹配；有渠道时要求两边一致，无渠道时只按线索ID
     value_rows = []
     params: dict[str, Any] = {}
     for i, (lead_id, channel) in enumerate(items):
@@ -625,10 +634,15 @@ def query_by_lead_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
         params,
     )
 
+    matched_ords: set[int] = set()
     ordered_ids: list[str] = []
     seen_p: set[str] = set()
     lead_meta: dict[str, dict[str, str]] = {}
     for r in matched:
+        try:
+            matched_ords.add(int(r.get("ord")))
+        except Exception:
+            pass
         pid = r.get("post_id")
         if not pid:
             continue
@@ -640,21 +654,36 @@ def query_by_lead_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
                 "query_friend_channel": r.get("query_channel") or r.get("friend_channel") or "",
             }
 
+    unmatched: list[str] = []
+    for i, (lead_id, channel) in enumerate(items):
+        if i not in matched_ords:
+            unmatched.append(f"{lead_id}\t{channel}" if channel else lead_id)
+
     rows = _posts_by_ordered_ids(ordered_ids, body.admin, body.page_code, body.limit)
     for row in rows:
         meta = lead_meta.get(row.get("post_id") or "", {})
         row["query_lead_id"] = meta.get("query_lead_id", "")
         row["query_friend_channel"] = meta.get("query_friend_channel", "")
 
-    return {
-        "total": len(rows),
-        "rows": rows,
-        "stats": {
-            "raw": len(raw_lines),
-            "recognized": len(items),
-            "returned": len(rows),
-        },
-    }
+    returned_ids = {r.get("post_id") for r in rows if r.get("post_id")}
+    # 有匹配帖文但被管理员过滤的输入
+    ord_to_pids: dict[int, list[str]] = {}
+    for r in matched:
+        try:
+            o = int(r.get("ord"))
+        except Exception:
+            continue
+        pid = r.get("post_id")
+        if not pid:
+            continue
+        ord_to_pids.setdefault(o, []).append(pid)
+    for i, (lead_id, channel) in enumerate(items):
+        pids = ord_to_pids.get(i, [])
+        label = f"{lead_id}\t{channel}" if channel else lead_id
+        if pids and not any(pid in returned_ids for pid in pids) and label not in unmatched:
+            unmatched.append(label)
+
+    return _query_response(rows, len(raw_lines), len(items), unmatched)
 
 
 @app.get("/api/sync/logs")
