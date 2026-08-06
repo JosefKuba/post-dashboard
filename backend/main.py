@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -48,6 +49,12 @@ class LoginBody(BaseModel):
 
 class SettingsBody(BaseModel):
     value: dict[str, Any]
+
+class QueryTextBody(BaseModel):
+    text: str = ""
+    admin: str = "__all__"
+    page_code: Optional[str] = None
+    limit: int = 5000
 
 def default_ui():
     return {
@@ -330,6 +337,326 @@ def overview(metric: str="invites", date_type: str="invite", sort_by: Optional[s
     order=f"HAVING COALESCE(SUM(q.leads),0)>=%(min_leads)s ORDER BY {order_col} {order_dir} NULLS LAST, {post_id_expr} DESC"
     total=fetch_one(count_sql(base, where_sql, post_id_expr), params)["total"]
     return {"total": total, "rows": fetch_all(common_sql(base, where_sql, order, post_id_expr), params)}
+
+
+def _split_query_lines(text: str) -> list[str]:
+    return [ln.strip() for ln in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+
+
+def _first_cell(line: str) -> str:
+    if "\t" in line:
+        return line.split("\t", 1)[0].strip()
+    return line.strip()
+
+
+def _post_id_variants(raw: str) -> list[str]:
+    """帖文ID查询：无 # 时自动补上；同时保留无 # 变体以便兼容库内两种写法。"""
+    s = (raw or "").strip()
+    if not s:
+        return []
+    # 去掉首尾空白与包裹引号
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    if not s:
+        return []
+    variants = [s]
+    if s.startswith("#"):
+        bare = s[1:].strip()
+        if bare:
+            variants.append(bare)
+            variants.append("#" + bare)
+    else:
+        variants.append("#" + s)
+    # 去重保序
+    seen, out = set(), []
+    for v in variants:
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def _normalize_link(link: str) -> str:
+    s = (link or "").strip()
+    if not s:
+        return ""
+    # 从混杂文本中提取 URL
+    m = re.search(r"https?://[^\s\t]+", s, flags=re.I)
+    if m:
+        s = m.group(0)
+    s = s.rstrip(").,;，。；]")
+    while s.endswith("/"):
+        s = s[:-1]
+    return s
+
+
+def _parse_lead_row(line: str) -> Optional[tuple[str, str]]:
+    """解析两列：线索ID、加友渠道。支持 Tab / 多空格 / 逗号分隔。"""
+    s = (line or "").strip()
+    if not s:
+        return None
+    if "\t" in s:
+        parts = [p.strip() for p in s.split("\t")]
+    elif "，" in s or "," in s:
+        parts = [p.strip() for p in re.split(r"[,，]", s, maxsplit=1)]
+    elif re.search(r"\s{2,}", s):
+        parts = [p.strip() for p in re.split(r"\s{2,}", s, maxsplit=1)]
+    else:
+        # 单空格：第一段为线索ID，其余为渠道
+        m = re.match(r"^(\S+)\s+(.+)$", s)
+        parts = [m.group(1), m.group(2)] if m else [s]
+    lead_id = (parts[0] if parts else "").strip()
+    friend_channel = (parts[1] if len(parts) > 1 else "").strip()
+    if not lead_id:
+        return None
+    return lead_id, friend_channel
+
+
+def _posts_by_ordered_ids(post_ids: list[str], admin: str = "__all__", page_code: Optional[str] = None, limit: int = 5000) -> list[dict]:
+    """按给定 post_id 列表取帖文详情，保持输入顺序；仅返回库中存在的帖文。"""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for pid in post_ids:
+        if pid and pid not in seen:
+            seen.add(pid)
+            ordered.append(pid)
+    if not ordered:
+        return []
+    limit = max(1, min(int(limit or 5000), 5000))
+    ordered = ordered[:limit]
+    params: dict[str, Any] = {"limit": limit, "offset": 0, "min_leads": 0, "ids": ordered}
+    base = """FROM (
+        SELECT unnest(%(ids)s::text[]) AS post_id
+    ) ids
+    LEFT JOIN post_rank_stats q ON q.post_id = ids.post_id"""
+    post_id_expr = "ids.post_id"
+    where = [
+        f"""(
+            EXISTS (SELECT 1 FROM post_rank_stats r WHERE r.post_id = {post_id_expr})
+            OR EXISTS (SELECT 1 FROM post_summaries s2 WHERE s2.post_id = {post_id_expr})
+            OR EXISTS (SELECT 1 FROM project_items pi2 WHERE pi2.post_id = {post_id_expr})
+        )"""
+    ]
+    _admin_page_where(where, params, admin, page_code, post_id_expr)
+    where_sql = " AND ".join(where)
+    order = (
+        f"HAVING COALESCE(SUM(q.leads),0)>=%(min_leads)s "
+        f"ORDER BY array_position(%(ids)s::text[], {post_id_expr}) NULLS LAST"
+    )
+    return fetch_all(common_sql(base, where_sql, order, post_id_expr), params)
+
+
+def _resolve_existing_post_ids(candidates: list[str]) -> set[str]:
+    if not candidates:
+        return set()
+    rows = fetch_all(
+        """
+        SELECT post_id FROM post_rank_stats WHERE post_id = ANY(%(ids)s)
+        UNION
+        SELECT post_id FROM post_summaries WHERE post_id = ANY(%(ids)s)
+        UNION
+        SELECT post_id FROM project_items WHERE post_id = ANY(%(ids)s)
+        """,
+        {"ids": candidates},
+    )
+    return {r["post_id"] for r in rows if r.get("post_id")}
+
+
+@app.post("/api/query/by-post-id")
+def query_by_post_id(body: QueryTextBody, x_user_token: Optional[str] = Header(default=None)):
+    """按帖文ID批量查询；输入无 # 时自动补上。"""
+    require_user(x_user_token)
+    raw_lines = _split_query_lines(body.text)
+    recognized_inputs: list[str] = []
+    for line in raw_lines:
+        cell = _first_cell(line)
+        if cell:
+            recognized_inputs.append(cell)
+
+    # 每个输入扩展为带/不带 # 的候选，优先匹配库中已有写法
+    all_candidates: list[str] = []
+    input_to_variants: list[list[str]] = []
+    for raw in recognized_inputs:
+        variants = _post_id_variants(raw)
+        # 查询时保证至少尝试补 # 后的形式
+        if variants and not any(v.startswith("#") for v in variants):
+            variants.append("#" + variants[0])
+        input_to_variants.append(variants)
+        all_candidates.extend(variants)
+
+    existing = _resolve_existing_post_ids(all_candidates)
+    resolved_ids: list[str] = []
+    for variants in input_to_variants:
+        # 优先用带 # 且存在的；否则用任意存在的；都没有则用补 # 后的首选（结果会被存在性过滤）
+        preferred = None
+        for v in variants:
+            if v in existing:
+                preferred = v
+                break
+        if preferred is None and variants:
+            # 优先选带 # 的变体作为“查询 ID”
+            preferred = next((v for v in variants if v.startswith("#")), variants[0])
+        if preferred:
+            resolved_ids.append(preferred)
+
+    rows = _posts_by_ordered_ids(resolved_ids, body.admin, body.page_code, body.limit)
+    return {
+        "total": len(rows),
+        "rows": rows,
+        "stats": {
+            "raw": len(raw_lines),
+            "recognized": len(recognized_inputs),
+            "returned": len(rows),
+        },
+    }
+
+
+@app.post("/api/query/by-post-link")
+def query_by_post_link(body: QueryTextBody, x_user_token: Optional[str] = Header(default=None)):
+    """按帖文链接批量查询。"""
+    require_user(x_user_token)
+    raw_lines = _split_query_lines(body.text)
+    links: list[str] = []
+    for line in raw_lines:
+        link = _normalize_link(line if "http" in line.lower() else _first_cell(line))
+        if not link and line:
+            link = _normalize_link(line)
+        if link:
+            links.append(link)
+
+    if not links:
+        return {"total": 0, "rows": [], "stats": {"raw": len(raw_lines), "recognized": 0, "returned": 0}}
+
+    # 同时匹配去尾斜杠与带尾斜杠
+    link_set: list[str] = []
+    seen_l: set[str] = set()
+    for lk in links:
+        for cand in (lk, lk + "/"):
+            if cand not in seen_l:
+                seen_l.add(cand)
+                link_set.append(cand)
+    norm_links = list({lk.rstrip("/") for lk in link_set if lk})
+
+    found = fetch_all(
+        """
+        SELECT post_id, post_link FROM post_summaries
+        WHERE NULLIF(post_link,'') IS NOT NULL
+          AND (
+            post_link = ANY(%(links)s)
+            OR RTRIM(post_link, '/') = ANY(%(norm_links)s)
+          )
+        UNION
+        SELECT post_id, post_link FROM post_rank_stats
+        WHERE NULLIF(post_link,'') IS NOT NULL
+          AND (
+            post_link = ANY(%(links)s)
+            OR RTRIM(post_link, '/') = ANY(%(norm_links)s)
+          )
+        """,
+        {"links": link_set, "norm_links": norm_links},
+    )
+    # 按输入链接顺序映射 post_id
+    link_to_posts: dict[str, list[str]] = {}
+    for r in found:
+        pid = r.get("post_id") or ""
+        pl = (r.get("post_link") or "").rstrip("/")
+        if not pid or not pl:
+            continue
+        link_to_posts.setdefault(pl, [])
+        if pid not in link_to_posts[pl]:
+            link_to_posts[pl].append(pid)
+
+    ordered_ids: list[str] = []
+    seen_p: set[str] = set()
+    for lk in links:
+        key = lk.rstrip("/")
+        for pid in link_to_posts.get(key, []):
+            if pid not in seen_p:
+                seen_p.add(pid)
+                ordered_ids.append(pid)
+
+    rows = _posts_by_ordered_ids(ordered_ids, body.admin, body.page_code, body.limit)
+    return {
+        "total": len(rows),
+        "rows": rows,
+        "stats": {
+            "raw": len(raw_lines),
+            "recognized": len(links),
+            "returned": len(rows),
+        },
+    }
+
+
+@app.post("/api/query/by-lead-id")
+def query_by_lead_id(body: QueryTextBody, x_user_token: Optional[str] = Header(default=None)):
+    """按线索ID + 加友渠道批量查询关联帖文。两列：第一列线索ID，第二列加友渠道。"""
+    require_user(x_user_token)
+    raw_lines = _split_query_lines(body.text)
+    items: list[tuple[str, str]] = []
+    for line in raw_lines:
+        parsed = _parse_lead_row(line)
+        if parsed:
+            items.append(parsed)
+
+    if not items:
+        return {"total": 0, "rows": [], "stats": {"raw": len(raw_lines), "recognized": 0, "returned": 0}}
+
+    # VALUES 批量配对匹配；有渠道时要求两边一致，无渠道时只按线索ID
+    value_rows = []
+    params: dict[str, Any] = {}
+    for i, (lead_id, channel) in enumerate(items):
+        params[f"l{i}"] = lead_id
+        params[f"c{i}"] = channel
+        params[f"ord{i}"] = i
+        value_rows.append(f"(%(ord{i})s::int, %(l{i})s::text, %(c{i})s::text)")
+    values_sql = ", ".join(value_rows)
+    matched = fetch_all(
+        f"""
+        SELECT v.ord, v.lead_id, v.friend_channel AS query_channel, pi.post_id, pi.friend_channel
+        FROM (VALUES {values_sql}) AS v(ord, lead_id, friend_channel)
+        JOIN project_items pi ON pi.lead_id = v.lead_id
+          AND (
+            NULLIF(v.friend_channel, '') IS NULL
+            OR pi.friend_channel = v.friend_channel
+          )
+        WHERE NULLIF(pi.post_id, '') IS NOT NULL
+        ORDER BY v.ord, pi.id
+        """,
+        params,
+    )
+
+    ordered_ids: list[str] = []
+    seen_p: set[str] = set()
+    lead_meta: dict[str, dict[str, str]] = {}
+    for r in matched:
+        pid = r.get("post_id")
+        if not pid:
+            continue
+        if pid not in seen_p:
+            seen_p.add(pid)
+            ordered_ids.append(pid)
+            lead_meta[pid] = {
+                "query_lead_id": r.get("lead_id") or "",
+                "query_friend_channel": r.get("query_channel") or r.get("friend_channel") or "",
+            }
+
+    rows = _posts_by_ordered_ids(ordered_ids, body.admin, body.page_code, body.limit)
+    for row in rows:
+        meta = lead_meta.get(row.get("post_id") or "", {})
+        row["query_lead_id"] = meta.get("query_lead_id", "")
+        row["query_friend_channel"] = meta.get("query_friend_channel", "")
+
+    return {
+        "total": len(rows),
+        "rows": rows,
+        "stats": {
+            "raw": len(raw_lines),
+            "recognized": len(items),
+            "returned": len(rows),
+        },
+    }
+
+
 @app.get("/api/sync/logs")
 def sync_logs(x_admin_token: Optional[str] = Header(default=None)):
     require_admin(x_admin_token)
