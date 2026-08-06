@@ -21,6 +21,43 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly", "https://www.
 def norm(v):
     return "" if v is None else str(v).strip()
 
+def norm_post_id(v):
+    """Normalize post IDs so Sheets numeric / scientific forms still match across tables.
+
+    Google UNFORMATTED_VALUE often returns large IDs as float (precision loss) or
+    strings like '1.234567890123456e+16' / '12345.0'. Rank / summary / project
+    sheets must land on the same string or joins only return post_id.
+    """
+    if v is None or v == "":
+        return ""
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, int) and not isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float):
+        if abs(v) >= 1e15 or v == int(v):
+            try:
+                return str(int(round(v)))
+            except Exception:
+                return norm(v)
+        return norm(v)
+    s = norm(v).replace(",", "").replace("，", "")
+    if not s:
+        return ""
+    # scientific notation text
+    if re.fullmatch(r"-?\d+(?:\.\d+)?[eE][+-]?\d+", s):
+        try:
+            return str(int(round(float(s))))
+        except Exception:
+            return s
+    # trailing .0 from numeric cells rendered as text
+    if re.fullmatch(r"-?\d+\.0+", s):
+        return s.split(".", 1)[0]
+    # pure integer string (possibly with spaces already stripped)
+    if re.fullmatch(r"-?\d+", s):
+        return s
+    return s
+
 def to_int(v):
     s = norm(v).replace(",", "").replace("，", "")
     if not s: return 0
@@ -99,6 +136,13 @@ def value_by_headers(row, hmap, names):
         if idx is not None and idx < len(row): return row[idx]
     return ""
 
+def _header_index(hmap, names):
+    """Return 0-based column index for the first matching header name, else None."""
+    for name in names:
+        if name in hmap:
+            return hmap[name]
+    return None
+
 def call_retry(fn, *args, **kwargs):
     waits = [3, 8, 20, 45]
     for i, wait in enumerate([0] + waits):
@@ -171,7 +215,7 @@ def sync_summary_source(gc, source_name, source_url, source_sheet):
     with pool.connection() as conn:
         with conn.cursor() as cur:
             for row in rows[1:]:
-                post_id = norm(value_by_headers(row, hmap, ["帖文ID", "评论ID", "post_id"]))
+                post_id = norm_post_id(value_by_headers(row, hmap, ["帖文ID", "评论ID", "post_id"]))
                 if not post_id: continue
                 post_time = parse_google_datetime(value_by_headers(row, hmap, ["帖文时间", "发帖日期", "post_time"]))
                 cur.execute("""
@@ -254,7 +298,7 @@ def sync_rank_for_page(gc, page):
     with pool.connection() as conn:
         with conn.cursor() as cur:
             for row in rows:
-                post_id = norm(row[0]) if len(row) > 0 else ""
+                post_id = norm_post_id(row[0]) if len(row) > 0 else ""
                 if not post_id: continue
 
                 post_link = norm(row[1]) if len(row) > 1 else ""
@@ -285,6 +329,14 @@ def sync_rank_for_page(gc, page):
         conn.commit()
     return count
 
+def ensure_project_items_columns():
+    """Ensure project_items has columns needed by church / invite_online sync."""
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE project_items ADD COLUMN IF NOT EXISTS lead_id TEXT")
+            cur.execute("ALTER TABLE project_items ADD COLUMN IF NOT EXISTS friend_channel TEXT")
+        conn.commit()
+
 def sync_project_from_config(gc, config_sheet_name, project_name, has_online=False):
     try:
         ws = open_ws(gc, CONFIG_SHEET_URL, config_sheet_name)
@@ -292,6 +344,7 @@ def sync_project_from_config(gc, config_sheet_name, project_name, has_online=Fal
         return 0, []
     cfg_rows = get_all_values(ws)
     count = 0; errors = []
+    ensure_project_items_columns()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM project_items WHERE project_name=%s", (project_name,))
@@ -301,29 +354,57 @@ def sync_project_from_config(gc, config_sheet_name, project_name, has_online=Fal
         source_sheet = norm(cfg[1]) if len(cfg) > 1 else ""
         post_col = col_to_index(cfg[2]) if len(cfg) > 2 else None
         date_col = col_to_index(cfg[3]) if len(cfg) > 3 else None
-        status_col = col_to_index(cfg[4]) if has_online and len(cfg) > 4 else None
-        online_code = norm(cfg[5]) if has_online and len(cfg) > 5 else ""
+        # 邀约上线配置：A URL | B sheet | C 帖文列 | D 日期列 | E 状态列 | F 上线码 | G 线索ID列 | H 加友渠道列
+        # 交教会配置：  A URL | B sheet | C 帖文列 | D 日期列 | E 线索ID列 | F 加友渠道列
+        if has_online:
+            status_col = col_to_index(cfg[4]) if len(cfg) > 4 else None
+            online_code = norm(cfg[5]) if len(cfg) > 5 else ""
+            lead_col = col_to_index(cfg[6]) if len(cfg) > 6 else None
+            channel_col = col_to_index(cfg[7]) if len(cfg) > 7 else None
+        else:
+            status_col = None
+            online_code = ""
+            lead_col = col_to_index(cfg[4]) if len(cfg) > 4 else None
+            channel_col = col_to_index(cfg[5]) if len(cfg) > 5 else None
         if not source_url or not source_sheet or post_col is None or date_col is None: continue
         try:
             source_ws = open_ws(gc, source_url, source_sheet)
             rows = get_all_values(source_ws, value_render_option="UNFORMATTED_VALUE", date_time_render_option="SERIAL_NUMBER")
         except Exception as e:
             errors.append(f"{source_sheet}: {e}"); continue
+        if not rows:
+            continue
+        hmap = header_map(rows[0])
+        # 未在配置里写列号时，再按表头名回退（表头必须完全一致，含空格会匹配失败）
+        if lead_col is None:
+            lead_col = _header_index(hmap, ["线索ID", "线索id", "线索Id", "lead_id", "Lead ID", "线索编号", "线索id号"])
+        if channel_col is None:
+            channel_col = _header_index(hmap, ["加友渠道", "加好友渠道", "加友渠道名", "friend_channel", "加粉渠道", "渠道"])
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 for idx, row in enumerate(rows[1:], start=2):
-                    post_id = norm(row[post_col]) if post_col < len(row) else ""
+                    post_id = norm_post_id(row[post_col]) if post_col < len(row) else ""
                     project_date = parse_google_date(row[date_col]) if date_col < len(row) else None
                     if not post_id: continue
+
                     status_text = norm(row[status_col]) if has_online and status_col is not None and status_col < len(row) else ""
                     is_online = bool(has_online and online_code and online_code in status_text)
+                    lead_id = norm(row[lead_col]) if lead_col is not None and lead_col < len(row) else ""
+                    friend_channel = norm(row[channel_col]) if channel_col is not None and channel_col < len(row) else ""
                     cur.execute("""
-                        INSERT INTO project_items(project_name,post_id,project_date,is_online,online_status_text,online_code,source_sheet_url,source_sheet_name,source_row,synced_at)
-                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                        INSERT INTO project_items(
+                          project_name,post_id,project_date,is_online,online_status_text,online_code,
+                          lead_id,friend_channel,source_sheet_url,source_sheet_name,source_row,synced_at
+                        )
+                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                         ON CONFLICT(project_name,post_id,project_date,source_sheet_url,source_sheet_name,source_row)
                         DO UPDATE SET is_online=EXCLUDED.is_online, online_status_text=EXCLUDED.online_status_text,
-                        online_code=EXCLUDED.online_code, synced_at=NOW()
-                    """, (project_name, post_id, project_date, is_online, status_text, online_code, source_url, source_sheet, idx))
+                        online_code=EXCLUDED.online_code, lead_id=EXCLUDED.lead_id,
+                        friend_channel=EXCLUDED.friend_channel, synced_at=NOW()
+                    """, (
+                        project_name, post_id, project_date, is_online, status_text, online_code,
+                        lead_id, friend_channel, source_url, source_sheet, idx,
+                    ))
                     count += 1
             conn.commit()
     return count, errors
@@ -340,7 +421,8 @@ def refresh_unmatched():
             """)
         conn.commit()
 
-def run_sync_all():
+def _with_sync_lock(scope, fn):
+    """Run fn(gc) under advisory lock; write sync_logs for scope."""
     with pool.connection() as lock_conn:
         with lock_conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(860601)")
@@ -348,29 +430,12 @@ def run_sync_all():
         lock_conn.commit()
         if not got_lock:
             return {"ok": False, "message": "已有同步正在运行，请稍后再试。"}
-        log_id = log_start("all")
+        log_id = log_start(scope)
         try:
             gc = get_gc()
-            sync_pages(gc)
-            summary_count, summary_errors = sync_summaries(gc)
-            church_count, church_errors = sync_project_from_config(gc, CHURCH_CONFIG_SHEET_NAME, "church", False)
-            invite_online_count, invite_online_errors = sync_project_from_config(gc, INVITE_ONLINE_CONFIG_SHEET_NAME, "invite_online", True)
-            with pool.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT page_code,admin_name,sheet_url FROM pages WHERE enabled=true")
-                    cols = [d.name for d in cur.description]
-                    pages = [dict(zip(cols, row)) for row in cur.fetchall()]
-            rank_total = 0; rank_errors = []
-            for page in pages:
-                try:
-                    rank_total += sync_rank_for_page(gc, page)
-                except Exception as e:
-                    rank_errors.append(f"{page.get('page_code')}: {e}")
-            refresh_unmatched()
-            errors = summary_errors + church_errors + invite_online_errors + rank_errors
-            msg = f"专页 {len(pages)} 个；汇总 {summary_count} 行；排行 {rank_total} 行；交教会 {church_count} 行；邀约上线 {invite_online_count} 行。"
+            msg, errors = fn(gc)
             if errors:
-                msg += " 错误：" + " | ".join(errors[:20])
+                msg = msg + " 错误：" + " | ".join(errors[:20])
                 log_finish(log_id, "partial", msg)
             else:
                 log_finish(log_id, "success", msg)
@@ -382,3 +447,67 @@ def run_sync_all():
             with lock_conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_unlock(860601)")
             lock_conn.commit()
+
+def run_sync_projects():
+    """Only sync 交教会帖文 + 邀约上线 (project_items)."""
+    def _run(gc):
+        church_count, church_errors = sync_project_from_config(gc, CHURCH_CONFIG_SHEET_NAME, "church", False)
+        invite_online_count, invite_online_errors = sync_project_from_config(
+            gc, INVITE_ONLINE_CONFIG_SHEET_NAME, "invite_online", True
+        )
+        errors = church_errors + invite_online_errors
+        msg = f"交教会 {church_count} 行；邀约上线 {invite_online_count} 行。"
+        return msg, errors
+    return _with_sync_lock("projects", _run)
+
+def run_sync_all():
+    def _run(gc):
+        sync_pages(gc)
+        summary_count, summary_errors = sync_summaries(gc)
+        church_count, church_errors = sync_project_from_config(gc, CHURCH_CONFIG_SHEET_NAME, "church", False)
+        invite_online_count, invite_online_errors = sync_project_from_config(
+            gc, INVITE_ONLINE_CONFIG_SHEET_NAME, "invite_online", True
+        )
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT page_code,admin_name,sheet_url FROM pages WHERE enabled=true")
+                cols = [d.name for d in cur.description]
+                pages = [dict(zip(cols, row)) for row in cur.fetchall()]
+        rank_total = 0
+        rank_errors = []
+        for page in pages:
+            try:
+                rank_total += sync_rank_for_page(gc, page)
+            except Exception as e:
+                rank_errors.append(f"{page.get('page_code')}: {e}")
+        refresh_unmatched()
+        errors = summary_errors + church_errors + invite_online_errors + rank_errors
+        msg = (
+            f"专页 {len(pages)} 个；汇总 {summary_count} 行；排行 {rank_total} 行；"
+            f"交教会 {church_count} 行；邀约上线 {invite_online_count} 行。"
+        )
+        return msg, errors
+    return _with_sync_lock("all", _run)
+
+def main():
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description="Google Sheets → DB 同步")
+    parser.add_argument(
+        "scope",
+        nargs="?",
+        default="all",
+        choices=["all", "projects"],
+        help="all=全量同步；projects=仅交教会帖文+邀约上线",
+    )
+    args = parser.parse_args()
+    if args.scope == "projects":
+        result = run_sync_projects()
+    else:
+        result = run_sync_all()
+    print(json.dumps(result, ensure_ascii=False))
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+if __name__ == "__main__":
+    main()

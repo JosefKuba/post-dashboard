@@ -66,12 +66,18 @@ CREATE TABLE IF NOT EXISTS project_items (
     is_online BOOLEAN NOT NULL DEFAULT FALSE,
     online_status_text TEXT,
     online_code TEXT,
+    lead_id TEXT,
+    friend_channel TEXT,
     source_sheet_url TEXT,
     source_sheet_name TEXT,
     source_row INTEGER,
     synced_at TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE(project_name, post_id, project_date, source_sheet_url, source_sheet_name, source_row)
 );
+
+-- 兼容已有库：补齐交教会/邀约上线新增字段
+ALTER TABLE project_items ADD COLUMN IF NOT EXISTS lead_id TEXT;
+ALTER TABLE project_items ADD COLUMN IF NOT EXISTS friend_channel TEXT;
 
 CREATE TABLE IF NOT EXISTS sync_logs (
     id BIGSERIAL PRIMARY KEY,
