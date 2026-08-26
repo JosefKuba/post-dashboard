@@ -6,13 +6,14 @@ from dateutil import parser
 import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
-from db import pool
+from db import pool, ensure_schema
 
 CONFIG_SHEET_URL = os.environ.get("CONFIG_SHEET_URL", "")
 CONFIG_PAGES_SHEET_NAME = os.environ.get("CONFIG_PAGES_SHEET_NAME", "专页配置")
 SUMMARY_CONFIG_SHEET_NAME = os.environ.get("SUMMARY_CONFIG_SHEET_NAME", "帖文汇总")
 CHURCH_CONFIG_SHEET_NAME = os.environ.get("CHURCH_CONFIG_SHEET_NAME", "交教会帖文")
 INVITE_ONLINE_CONFIG_SHEET_NAME = os.environ.get("INVITE_ONLINE_CONFIG_SHEET_NAME", "邀约上线")
+FOREIGN_REF_CONFIG_SHEET_NAME = os.environ.get("FOREIGN_REF_CONFIG_SHEET_NAME", "外语系参考")
 RANK_SHEET_NAME = os.environ.get("RANK_SHEET_NAME", "帖文排行")
 RANK_START_ROW = int(os.environ.get("RANK_START_ROW", "3"))
 RANK_PAGE_INTERVAL_SECONDS = max(0.0, float(os.environ.get("RANK_PAGE_INTERVAL_SECONDS", "2")))
@@ -651,6 +652,168 @@ def sync_project_from_config(gc, config_sheet_name, project_name, has_online=Fal
         )
     return count, errors
 
+def parse_engagement(v):
+    """Parse '380273 / 47911 / 10000' into likes, comments, shares."""
+    s = norm(v)
+    if not s:
+        return 0, 0, 0
+    parts = re.split(r"\s*[/|｜／]\s*", s)
+    likes = to_int(parts[0]) if len(parts) > 0 else 0
+    comments = to_int(parts[1]) if len(parts) > 1 else 0
+    shares = to_int(parts[2]) if len(parts) > 2 else 0
+    return likes, comments, shares
+
+
+def _cell_pref(row, hmap, names, col_idx):
+    """Prefer named header; fall back to 0-based column index (A=0)."""
+    idx = _header_index(hmap, names)
+    if idx is None:
+        idx = col_idx
+    if idx is None or idx < 0 or idx >= len(row):
+        return ""
+    return row[idx]
+
+
+def _engagement_index(hmap):
+    idx = _header_index(hmap, ["点赞 / 评论 / 分享", "点赞/评论/分享", "点赞／评论／分享"])
+    if idx is not None:
+        return idx
+    for name, i in hmap.items():
+        if "点赞" in name and ("评论" in name or "分享" in name):
+            return i
+    return 8
+
+
+def sync_foreign_ref_source(gc, source_url, source_sheet):
+    rows = sheet_values(
+        gc, source_url, source_sheet,
+        value_render_option="UNFORMATTED_VALUE",
+        date_time_render_option="SERIAL_NUMBER",
+    )
+    if not rows:
+        return 0
+    hmap = header_map(rows[0])
+    eng_idx = _engagement_index(hmap)
+    lang_label = source_sheet
+    count = 0
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM foreign_ref_posts WHERE source_url=%s AND source_sheet=%s",
+                (source_url, source_sheet),
+            )
+            for row in rows[1:]:
+                post_id = norm_post_id(_cell_pref(row, hmap, ["ID", "帖文ID", "评论ID", "post_id"], 0))
+                if not post_id:
+                    continue
+                likes, comments, shares = parse_engagement(_cell_pref(
+                    row, hmap, ["点赞 / 评论 / 分享", "点赞/评论/分享", "点赞／评论／分享"], eng_idx
+                ))
+                post_time = parse_google_datetime(_cell_pref(row, hmap, ["发帖日期", "帖文时间", "发帖时间", "post_time"], 4))
+                cur.execute(
+                    """
+                    INSERT INTO foreign_ref_posts(
+                        post_id, lang_label, leads, post_link, image_link, post_time, post_type,
+                        caption_original, caption_zh, post_likes, post_comments, post_shares,
+                        source_url, source_sheet, updated_at
+                    ) VALUES (
+                        %(post_id)s, %(lang_label)s, %(leads)s, %(post_link)s, %(image_link)s, %(post_time)s, %(post_type)s,
+                        %(caption_original)s, %(caption_zh)s, %(post_likes)s, %(post_comments)s, %(post_shares)s,
+                        %(source_url)s, %(source_sheet)s, NOW()
+                    )
+                    ON CONFLICT (source_url, source_sheet, post_id) DO UPDATE SET
+                        lang_label=EXCLUDED.lang_label, leads=EXCLUDED.leads,
+                        post_link=EXCLUDED.post_link, image_link=EXCLUDED.image_link,
+                        post_time=EXCLUDED.post_time, post_type=EXCLUDED.post_type,
+                        caption_original=EXCLUDED.caption_original, caption_zh=EXCLUDED.caption_zh,
+                        post_likes=EXCLUDED.post_likes, post_comments=EXCLUDED.post_comments,
+                        post_shares=EXCLUDED.post_shares, updated_at=NOW()
+                    """,
+                    {
+                        "post_id": post_id,
+                        "lang_label": lang_label,
+                        "leads": to_int(_cell_pref(row, hmap, ["引流量", "引流", "leads"], 1)),
+                        "post_link": norm(_cell_pref(row, hmap, ["帖文链接", "post_link"], 2)),
+                        "image_link": norm(_cell_pref(row, hmap, ["图片链接", "帖文多媒体", "display_media"], 3)),
+                        "post_time": post_time,
+                        "post_type": norm(_cell_pref(row, hmap, ["帖文类型", "post_type"], 5)),
+                        "caption_original": norm(_cell_pref(row, hmap, ["图片文案", "文案", "帖文信息"], 6)),
+                        "caption_zh": norm(_cell_pref(row, hmap, ["图片中文", "中文", "帖文信息翻译"], 7)),
+                        "post_likes": likes,
+                        "post_comments": comments,
+                        "post_shares": shares,
+                        "source_url": source_url,
+                        "source_sheet": source_sheet,
+                    },
+                )
+                count += 1
+        conn.commit()
+    return count
+
+
+def sync_foreign_ref(gc):
+    ensure_schema()
+    label = FOREIGN_REF_CONFIG_SHEET_NAME
+    progress(f"→ 配置表「{label}」读取中…")
+    t0 = time.monotonic()
+    try:
+        cfg_rows = sheet_values(gc, CONFIG_SHEET_URL, FOREIGN_REF_CONFIG_SHEET_NAME)
+    except Exception as e:
+        if _progress is not None:
+            _progress.fail_sheets += 1
+        progress(f"✗ 配置表「{label}」打开失败：{e}")
+        return 0, [f"{label}: {e}"]
+    sources = []
+    for row in cfg_rows[1:]:
+        source_url = norm(row[0]) if len(row) > 0 else ""
+        source_sheet = norm(row[1]) if len(row) > 1 else ""
+        if not source_url or not source_sheet:
+            continue
+        if source_url in ("表格链接", "url", "URL") or source_sheet in ("Sheet名称", "语系"):
+            continue
+        sources.append((source_url, source_sheet))
+    if _progress is not None:
+        _progress.ok_sheets += 1
+    progress(f"✓ 配置表「{label}」共 {len(sources)} 个语系表，耗时 {_fmt_dur(time.monotonic() - t0)}")
+    total = 0
+    errors = []
+    for i, (source_url, source_sheet) in enumerate(sources, 1):
+        progress(f"→ [{i}/{len(sources)}] 外语系参考「{source_sheet}」读取中…")
+        t1 = time.monotonic()
+        try:
+            n = sync_foreign_ref_source(gc, source_url, source_sheet)
+            total += n
+            if _progress is not None:
+                _progress.ok_sheets += 1
+            progress(
+                f"✓ [{i}/{len(sources)}] 外语系参考「{source_sheet}」完成 {n} 行，"
+                f"耗时 {_fmt_dur(time.monotonic() - t1)}"
+            )
+        except Exception as e:
+            errors.append(f"{source_sheet}: {e}")
+            if _progress is not None:
+                _progress.fail_sheets += 1
+            progress(f"✗ [{i}/{len(sources)}] 外语系参考「{source_sheet}」失败：{e}")
+    if sources:
+        urls = [u for u, _s in sources]
+        sheets = [s for _u, s in sources]
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM foreign_ref_posts f
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM unnest(%s::text[], %s::text[]) AS t(u, s)
+                        WHERE t.u = f.source_url AND t.s = f.source_sheet
+                    )
+                    """,
+                    (urls, sheets),
+                )
+            conn.commit()
+    return total, errors
+
+
 def refresh_unmatched():
     progress("→ 刷新未匹配帖文…")
     t0 = time.monotonic()
@@ -730,16 +893,30 @@ def run_sync_projects():
         return msg, errors
     return _with_sync_lock("projects", _run)
 
+def run_sync_foreign():
+    """Only sync 外语系参考 posts. Does not touch rank / project / summary tables."""
+    def _run(gc):
+        progress("======== 外语系参考同步开始 ========")
+        count, errors = sync_foreign_ref(gc)
+        ok = _progress.ok_sheets if _progress is not None else 0
+        fail = _progress.fail_sheets if _progress is not None else len(errors)
+        msg = f"外语系参考 {count} 行。表格成功 {ok} / 失败 {fail}。"
+        progress("======== 外语系参考同步完成 ========")
+        return msg, errors
+    return _with_sync_lock("foreign", _run)
+
 def run_sync_all():
     def _run(gc):
         progress("======== 全量同步开始 ========")
-        progress("阶段 1/6 专页配置")
+        progress("阶段 1/7 专页配置")
         sync_pages(gc)
-        progress("阶段 2/6 帖文汇总")
+        progress("阶段 2/7 帖文汇总")
         summary_count, summary_errors = sync_summaries(gc)
-        progress("阶段 3/6 交教会帖文")
+        progress("阶段 3/7 外语系参考")
+        foreign_count, foreign_errors = sync_foreign_ref(gc)
+        progress("阶段 4/7 交教会帖文")
         church_count, church_errors = sync_project_from_config(gc, CHURCH_CONFIG_SHEET_NAME, "church", False)
-        progress("阶段 4/6 邀约上线")
+        progress("阶段 5/7 邀约上线")
         invite_online_count, invite_online_errors = sync_project_from_config(
             gc, INVITE_ONLINE_CONFIG_SHEET_NAME, "invite_online", True
         )
@@ -749,7 +926,7 @@ def run_sync_all():
                 cols = [d.name for d in cur.description]
                 pages = [dict(zip(cols, row)) for row in cur.fetchall()]
         progress(
-            f"阶段 5/6 各专页「{RANK_SHEET_NAME}」，共 {len(pages)} 个启用专页"
+            f"阶段 6/7 各专页「{RANK_SHEET_NAME}」，共 {len(pages)} 个启用专页"
             + (f"，每个间隔 {RANK_PAGE_INTERVAL_SECONDS:g}s" if RANK_PAGE_INTERVAL_SECONDS > 0 else "")
         )
         rank_total = 0
@@ -774,14 +951,14 @@ def run_sync_all():
                 progress(f"✗ [{i}/{len(pages)}] 帖文排行「{name}」失败：{e}")
             if i < len(pages) and RANK_PAGE_INTERVAL_SECONDS > 0:
                 time.sleep(RANK_PAGE_INTERVAL_SECONDS)
-        progress("阶段 6/6 刷新未匹配帖文")
+        progress("阶段 7/7 刷新未匹配帖文")
         refresh_unmatched()
-        errors = summary_errors + church_errors + invite_online_errors + rank_errors
+        errors = summary_errors + foreign_errors + church_errors + invite_online_errors + rank_errors
         ok = _progress.ok_sheets if _progress is not None else 0
         fail = _progress.fail_sheets if _progress is not None else len(errors)
         msg = (
-            f"专页 {len(pages)} 个；汇总 {summary_count} 行；排行 {rank_total} 行；"
-            f"交教会 {church_count} 行；邀约上线 {invite_online_count} 行。"
+            f"专页 {len(pages)} 个；汇总 {summary_count} 行；外语系参考 {foreign_count} 行；"
+            f"排行 {rank_total} 行；交教会 {church_count} 行；邀约上线 {invite_online_count} 行。"
             f"表格成功 {ok} / 失败 {fail}。"
         )
         progress("======== 全量同步完成 ========")
@@ -796,12 +973,14 @@ def main():
         "scope",
         nargs="?",
         default="all",
-        choices=["all", "projects"],
-        help="all=全量同步；projects=仅交教会帖文+邀约上线",
+        choices=["all", "projects", "foreign"],
+        help="all=全量同步；projects=仅交教会帖文+邀约上线；foreign=仅外语系参考",
     )
     args = parser.parse_args()
     if args.scope == "projects":
         result = run_sync_projects()
+    elif args.scope == "foreign":
+        result = run_sync_foreign()
     else:
         result = run_sync_all()
     print(json.dumps(result, ensure_ascii=False))

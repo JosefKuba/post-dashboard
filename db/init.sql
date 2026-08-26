@@ -103,6 +103,26 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS foreign_ref_posts (
+    id BIGSERIAL PRIMARY KEY,
+    post_id TEXT NOT NULL,
+    lang_label TEXT NOT NULL,
+    leads INTEGER DEFAULT 0,
+    post_link TEXT,
+    image_link TEXT,
+    post_time TIMESTAMP NULL,
+    post_type TEXT,
+    caption_original TEXT,
+    caption_zh TEXT,
+    post_likes BIGINT DEFAULT 0,
+    post_comments BIGINT DEFAULT 0,
+    post_shares BIGINT DEFAULT 0,
+    source_url TEXT NOT NULL DEFAULT '',
+    source_sheet TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(source_url, source_sheet, post_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_pages_code_admin ON pages(page_code, admin_name);
 CREATE INDEX IF NOT EXISTS idx_pages_page_id ON pages(page_id);
 CREATE INDEX IF NOT EXISTS idx_rank_admin ON post_rank_stats(admin_name);
@@ -112,3 +132,8 @@ CREATE INDEX IF NOT EXISTS idx_rank_lead_date ON post_rank_stats(lead_date);
 CREATE INDEX IF NOT EXISTS idx_summary_post_time ON post_summaries(post_time);
 CREATE INDEX IF NOT EXISTS idx_project_name_date ON project_items(project_name, project_date);
 CREATE INDEX IF NOT EXISTS idx_project_post ON project_items(post_id);
+CREATE INDEX IF NOT EXISTS idx_foreign_ref_lang ON foreign_ref_posts(lang_label);
+CREATE INDEX IF NOT EXISTS idx_foreign_ref_type ON foreign_ref_posts(post_type);
+CREATE INDEX IF NOT EXISTS idx_foreign_ref_leads ON foreign_ref_posts(leads);
+CREATE INDEX IF NOT EXISTS idx_foreign_ref_post_time ON foreign_ref_posts(post_time);
+CREATE INDEX IF NOT EXISTS idx_foreign_ref_lang_type ON foreign_ref_posts(lang_label, post_type);

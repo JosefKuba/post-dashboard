@@ -9,8 +9,8 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from psycopg.types.json import Jsonb
-from db import fetch_all, fetch_one, execute, pool
-from sync import run_sync_all, run_sync_projects
+from db import fetch_all, fetch_one, execute, pool, ensure_schema
+from sync import run_sync_all, run_sync_projects, run_sync_foreign
 
 USER_PASSWORD = os.environ.get("USER_PASSWORD", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
@@ -18,6 +18,10 @@ FACEBOOK_ACCESS_TOKEN = os.environ.get("FACEBOOK_ACCESS_TOKEN", "")
 
 app = FastAPI(title="Post Dashboard V11")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.on_event("startup")
+def _startup():
+    ensure_schema()
 
 def add_month(year, month, delta):
     total = year * 12 + (month - 1) + delta
@@ -686,6 +690,118 @@ def query_by_lead_id(body: QueryTextBody, x_user_token: Optional[str] = Header(d
     return _query_response(rows, len(raw_lines), len(items), unmatched)
 
 
+REF_SORT_MAP = {
+    "leads": "leads",
+    "post_likes": "post_likes",
+    "post_comments": "post_comments",
+    "post_shares": "post_shares",
+    "post_time": "post_time",
+    "post_type": "post_type",
+    "lang_label": "lang_label",
+}
+
+
+def _reference_where(params, lang, post_type, min_leads, start_date, end_date):
+    where = ["1=1"]
+    if lang:
+        where.append("lang_label=%(lang)s")
+        params["lang"] = lang
+    if post_type:
+        where.append("post_type=%(post_type)s")
+        params["post_type"] = post_type
+    where.append("COALESCE(leads,0) >= %(min_leads)s")
+    params["min_leads"] = min_leads
+    if start_date:
+        where.append("post_time::date >= %(start_date)s")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("post_time::date <= %(end_date)s")
+        params["end_date"] = end_date
+    return " AND ".join(where)
+
+
+@app.get("/api/reference/meta")
+def reference_meta(lang: str = "", x_user_token: Optional[str] = Header(default=None)):
+    """Lang tabs + post-type dropdown for 外语系参考. Isolated from /api/admins and /api/pages."""
+    require_user(x_user_token)
+    ensure_schema()
+    langs = [r["lang_label"] for r in fetch_all(
+        "SELECT lang_label FROM foreign_ref_posts GROUP BY lang_label ORDER BY MIN(id)"
+    )]
+    type_params: dict[str, Any] = {}
+    type_where = "NULLIF(post_type,'') IS NOT NULL"
+    if lang:
+        type_where += " AND lang_label=%(lang)s"
+        type_params["lang"] = lang
+    post_types = [r["post_type"] for r in fetch_all(
+        f"SELECT post_type FROM foreign_ref_posts WHERE {type_where} GROUP BY post_type ORDER BY post_type",
+        type_params,
+    )]
+    return {"langs": langs, "post_types": post_types}
+
+
+@app.get("/api/reference/posts")
+def reference_posts(
+    lang: str = "",
+    post_type: str = "",
+    min_leads: int = Query(0, ge=0),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    x_user_token: Optional[str] = Header(default=None),
+):
+    """外语系参考：不走排行/项目/本语系汇总，不影响现有页签。"""
+    require_user(x_user_token)
+    ensure_schema()
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    where_sql = _reference_where(params, lang, post_type, min_leads, start_date, end_date)
+    order_col = REF_SORT_MAP.get(sort_by or "leads", "leads")
+    order_dir = "ASC" if sort_dir.lower() == "asc" else "DESC"
+    total_row = fetch_one(f"SELECT COUNT(*) AS total FROM foreign_ref_posts WHERE {where_sql}", params)
+    rows = fetch_all(
+        f"""
+        SELECT
+            post_id,
+            lang_label,
+            lang_label AS page_code,
+            ''::text AS admin_name,
+            ''::text AS page_id,
+            ''::text AS page_avatar,
+            COALESCE(leads,0) AS leads,
+            0::bigint AS invites,
+            0::bigint AS online,
+            0::bigint AS church,
+            0::bigint AS male,
+            0::bigint AS female,
+            post_link,
+            image_link,
+            COALESCE(NULLIF(image_link,''), '') AS display_media,
+            post_time,
+            NULL::date AS lead_date,
+            COALESCE(post_type, '') AS post_type,
+            COALESCE(caption_original, '') AS caption_original,
+            COALESCE(caption_zh, '') AS caption_zh,
+            COALESCE(caption_original, '') AS post_info,
+            COALESCE(caption_zh, '') AS post_info_translation,
+            COALESCE(post_likes,0) AS post_likes,
+            COALESCE(post_comments,0) AS post_comments,
+            COALESCE(post_shares,0) AS post_shares,
+            COALESCE(source_sheet, '') AS summary_source_sheet,
+            lang_label AS summary_source_name,
+            TRUE AS is_foreign_ref
+        FROM foreign_ref_posts
+        WHERE {where_sql}
+        ORDER BY {order_col} {order_dir} NULLS LAST, id DESC
+        LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    return {"total": (total_row or {}).get("total", 0), "rows": rows}
+
+
 @app.get("/api/sync/logs")
 def sync_logs(x_admin_token: Optional[str] = Header(default=None)):
     require_admin(x_admin_token)
@@ -706,3 +822,9 @@ def sync_run_projects(x_admin_token: Optional[str] = Header(default=None)):
     """仅同步交教会帖文 + 邀约上线。"""
     require_admin(x_admin_token)
     return run_sync_projects()
+
+@app.post("/api/sync/run/foreign")
+def sync_run_foreign(x_admin_token: Optional[str] = Header(default=None)):
+    """仅同步外语系参考。不改动排行/项目/本语系汇总。"""
+    require_admin(x_admin_token)
+    return run_sync_foreign()
