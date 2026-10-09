@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from psycopg.types.json import Jsonb
 from db import fetch_all, fetch_one, execute, pool, ensure_schema
-from sync import run_sync_all, run_sync_projects, run_sync_foreign
+from sync import run_sync_all, run_sync_projects, run_sync_foreign, run_sync_summaries
 
 USER_PASSWORD = os.environ.get("USER_PASSWORD", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
@@ -696,6 +696,7 @@ REF_SORT_MAP = {
     "post_comments": "post_comments",
     "post_shares": "post_shares",
     "post_time": "post_time",
+    "register_date": "register_date",
     "post_type": "post_type",
     "lang_label": "lang_label",
 }
@@ -712,10 +713,10 @@ def _reference_where(params, lang, post_type, min_leads, start_date, end_date):
     where.append("COALESCE(leads,0) >= %(min_leads)s")
     params["min_leads"] = min_leads
     if start_date:
-        where.append("post_time::date >= %(start_date)s")
+        where.append("COALESCE(register_date, post_time::date) >= %(start_date)s")
         params["start_date"] = start_date
     if end_date:
-        where.append("post_time::date <= %(end_date)s")
+        where.append("COALESCE(register_date, post_time::date) <= %(end_date)s")
         params["end_date"] = end_date
     return " AND ".join(where)
 
@@ -758,7 +759,7 @@ def reference_posts(
     ensure_schema()
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     where_sql = _reference_where(params, lang, post_type, min_leads, start_date, end_date)
-    order_col = REF_SORT_MAP.get(sort_by or "leads", "leads")
+    order_col = REF_SORT_MAP.get(sort_by or "register_date", "register_date")
     order_dir = "ASC" if sort_dir.lower() == "asc" else "DESC"
     total_row = fetch_one(f"SELECT COUNT(*) AS total FROM foreign_ref_posts WHERE {where_sql}", params)
     rows = fetch_all(
@@ -780,6 +781,7 @@ def reference_posts(
             image_link,
             COALESCE(NULLIF(image_link,''), '') AS display_media,
             post_time,
+            register_date,
             NULL::date AS lead_date,
             COALESCE(post_type, '') AS post_type,
             COALESCE(caption_original, '') AS caption_original,
@@ -828,3 +830,9 @@ def sync_run_foreign(x_admin_token: Optional[str] = Header(default=None)):
     """仅同步外语系参考。不改动排行/项目/本语系汇总。"""
     require_admin(x_admin_token)
     return run_sync_foreign()
+
+@app.post("/api/sync/run/summaries")
+def sync_run_summaries(x_admin_token: Optional[str] = Header(default=None)):
+    """仅同步帖文汇总。不改动排行/项目/外语系参考。"""
+    require_admin(x_admin_token)
+    return run_sync_summaries()

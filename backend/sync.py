@@ -710,16 +710,17 @@ def sync_foreign_ref_source(gc, source_url, source_sheet):
                     row, hmap, ["点赞 / 评论 / 分享", "点赞/评论/分享", "点赞／评论／分享"], eng_idx
                 ))
                 post_time = parse_google_datetime(_cell_pref(row, hmap, ["发帖日期", "帖文时间", "发帖时间", "post_time"], 4))
+                register_date = parse_google_date(_cell_pref(row, hmap, ["登记日期", "register_date"], 9))
                 cur.execute(
                     """
                     INSERT INTO foreign_ref_posts(
                         post_id, lang_label, leads, post_link, image_link, post_time, post_type,
                         caption_original, caption_zh, post_likes, post_comments, post_shares,
-                        source_url, source_sheet, updated_at
+                        register_date, source_url, source_sheet, updated_at
                     ) VALUES (
                         %(post_id)s, %(lang_label)s, %(leads)s, %(post_link)s, %(image_link)s, %(post_time)s, %(post_type)s,
                         %(caption_original)s, %(caption_zh)s, %(post_likes)s, %(post_comments)s, %(post_shares)s,
-                        %(source_url)s, %(source_sheet)s, NOW()
+                        %(register_date)s, %(source_url)s, %(source_sheet)s, NOW()
                     )
                     ON CONFLICT (source_url, source_sheet, post_id) DO UPDATE SET
                         lang_label=EXCLUDED.lang_label, leads=EXCLUDED.leads,
@@ -727,7 +728,8 @@ def sync_foreign_ref_source(gc, source_url, source_sheet):
                         post_time=EXCLUDED.post_time, post_type=EXCLUDED.post_type,
                         caption_original=EXCLUDED.caption_original, caption_zh=EXCLUDED.caption_zh,
                         post_likes=EXCLUDED.post_likes, post_comments=EXCLUDED.post_comments,
-                        post_shares=EXCLUDED.post_shares, updated_at=NOW()
+                        post_shares=EXCLUDED.post_shares, register_date=EXCLUDED.register_date,
+                        updated_at=NOW()
                     """,
                     {
                         "post_id": post_id,
@@ -742,6 +744,7 @@ def sync_foreign_ref_source(gc, source_url, source_sheet):
                         "post_likes": likes,
                         "post_comments": comments,
                         "post_shares": shares,
+                        "register_date": register_date,
                         "source_url": source_url,
                         "source_sheet": source_sheet,
                     },
@@ -905,6 +908,19 @@ def run_sync_foreign():
         return msg, errors
     return _with_sync_lock("foreign", _run)
 
+def run_sync_summaries():
+    """Only sync 帖文汇总 (post_summaries). Does not touch rank / project / foreign tables."""
+    def _run(gc):
+        progress("======== 帖文汇总同步开始 ========")
+        count, errors = sync_summaries(gc)
+        refresh_unmatched()
+        ok = _progress.ok_sheets if _progress is not None else 0
+        fail = _progress.fail_sheets if _progress is not None else len(errors)
+        msg = f"帖文汇总 {count} 行。表格成功 {ok} / 失败 {fail}。"
+        progress("======== 帖文汇总同步完成 ========")
+        return msg, errors
+    return _with_sync_lock("summaries", _run)
+
 def run_sync_all():
     def _run(gc):
         progress("======== 全量同步开始 ========")
@@ -973,14 +989,16 @@ def main():
         "scope",
         nargs="?",
         default="all",
-        choices=["all", "projects", "foreign"],
-        help="all=全量同步；projects=仅交教会帖文+邀约上线；foreign=仅外语系参考",
+        choices=["all", "projects", "foreign", "summaries"],
+        help="all=全量同步；projects=仅交教会帖文+邀约上线；foreign=仅外语系参考；summaries=仅帖文汇总",
     )
     args = parser.parse_args()
     if args.scope == "projects":
         result = run_sync_projects()
     elif args.scope == "foreign":
         result = run_sync_foreign()
+    elif args.scope == "summaries":
+        result = run_sync_summaries()
     else:
         result = run_sync_all()
     print(json.dumps(result, ensure_ascii=False))

@@ -40,16 +40,19 @@ def ensure_schema():
             post_likes BIGINT DEFAULT 0,
             post_comments BIGINT DEFAULT 0,
             post_shares BIGINT DEFAULT 0,
+            register_date DATE NULL,
             source_url TEXT NOT NULL DEFAULT '',
             source_sheet TEXT NOT NULL DEFAULT '',
             updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
             UNIQUE(source_url, source_sheet, post_id)
         )
         """,
+        "ALTER TABLE foreign_ref_posts ADD COLUMN IF NOT EXISTS register_date DATE NULL",
         "CREATE INDEX IF NOT EXISTS idx_foreign_ref_lang ON foreign_ref_posts(lang_label)",
         "CREATE INDEX IF NOT EXISTS idx_foreign_ref_type ON foreign_ref_posts(post_type)",
         "CREATE INDEX IF NOT EXISTS idx_foreign_ref_leads ON foreign_ref_posts(leads)",
         "CREATE INDEX IF NOT EXISTS idx_foreign_ref_post_time ON foreign_ref_posts(post_time)",
+        "CREATE INDEX IF NOT EXISTS idx_foreign_ref_register_date ON foreign_ref_posts(register_date)",
         "CREATE INDEX IF NOT EXISTS idx_foreign_ref_lang_type ON foreign_ref_posts(lang_label, post_type)",
     ]
     with pool.connection() as conn:

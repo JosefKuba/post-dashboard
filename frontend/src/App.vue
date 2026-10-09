@@ -16,7 +16,16 @@
       <label>引流量最低值<input type="number" min="0" step="1" v-model.number="filters.ref_min_leads" @change="scheduleFilterLoad"/></label>
       <label>开始日期<input type="date" v-model="filters.ref_start_date" @change="onRefDateChange"/></label>
       <label>结束日期<input type="date" v-model="filters.ref_end_date" @change="onRefDateChange"/></label>
-      <button :class="{active:!filters.ref_start_date&&!filters.ref_end_date}" @click="clearRefDates">全部日期</button>
+      <button :class="{active:refQuickMode==='today'}" @click="quickRefDay(0)">今日</button>
+      <button :class="{active:refQuickMode==='yesterday'}" @click="quickRefDay(1)">昨日</button>
+      <button :class="{active:refQuickMode==='before'}" @click="quickRefDay(2)">前日</button>
+      <button :class="{active:refQuickMode==='last7'}" @click="quickRefLast7">最近7天</button>
+      <button :class="{active:refQuickMode==='all'}" @click="clearRefDates">全部日期</button>
+      <span class="filter-hint">排序</span>
+      <button :class="{active:refSortMode==='leads'}" @click="setRefSort('leads')">按引流</button>
+      <button :class="{active:refSortMode==='post_time'}" @click="setRefSort('post_time')">按发帖日期</button>
+      <button :class="{active:refSortMode==='register_date'}" @click="setRefSort('register_date')">按入库日期</button>
+      <button :class="{active:refSortMode==='post_likes'}" @click="setRefSort('post_likes')">按点赞</button>
       <span class="filter-hint">修改条件后自动查询</span>
     </section>
     <section v-else-if="!isQueryPage" class="filters">
@@ -55,7 +64,7 @@
       <div class="cell-popover-text">{{cellTip.text}}</div>
       <button v-if="cellTip.copyable" class="cell-popover-copy" @click.stop="copyFromTip">复制全文</button>
     </div>
-    <div v-else-if="ui.view!=='table' && rows.length" class="cards" :class="ui.view"><div v-for="(r,idx) in rows" :key="(r.lang_label||'')+'-'+r.post_id+'-'+idx" class="card" :class="{cardActive:detailIndex===idx}"><div class="media" :style="{aspectRatio:currentCardConfig.ratio}"><img v-if="imageOf(r)" :src="imageOf(r)"/><div v-else class="noimg">无图</div></div><div class="card-body"><div v-if="currentCardConfig.avatar" class="page-title"><Avatar :src="r.page_avatar" :label="r.lang_label||r.page_code"/> <b>{{isForeignRefPage?(r.lang_label||r.page_code):r.page_code}}</b></div><div class="id">{{r.post_id}}</div><div v-if="currentCardConfig.dates" class="meta"><template v-if="isForeignRefPage">发帖：{{formatDate(r.post_time)}}</template><template v-else>引流：{{formatDate(r.lead_date)}}　发帖：{{formatDate(r.post_time)}}</template></div><div v-if="currentCardConfig.gender && !isForeignRefPage" class="nums">{{genderRatio(r)}}</div><div v-if="currentCardConfig.metrics" class="nums"><template v-if="isForeignRefPage">引流量 {{r.leads}}</template><template v-else>引流 {{r.leads}} / 邀约 {{r.invites}} / 上线 {{r.online}} / 交教会 {{r.church}}</template></div><div v-if="currentCardConfig.engagement" class="nums">点赞 {{r.post_likes}} / 评论 {{r.post_comments}} / 分享 {{r.post_shares}}</div><div v-if="currentCardConfig.pageType" class="ptype">{{r.post_type}}</div><p v-if="currentCardConfig.summary">{{shortText(isForeignRefPage?(r.caption_zh||r.post_info_translation||r.caption_original||r.post_info):r.post_info)}}</p><div v-if="currentCardConfig.buttons" class="card-actions"><a :href="r.post_link" target="_blank">打开帖文</a><button @click="openDetail(r,idx)">查看详情</button></div></div></div></div>
+    <div v-else-if="ui.view!=='table' && rows.length" class="cards" :class="ui.view"><div v-for="(r,idx) in rows" :key="(r.lang_label||'')+'-'+r.post_id+'-'+idx" class="card" :class="{cardActive:detailIndex===idx}"><div class="media" :style="{aspectRatio:currentCardConfig.ratio}"><img v-if="imageOf(r)" :src="imageOf(r)"/><div v-else class="noimg">无图</div></div><div class="card-body"><div v-if="currentCardConfig.avatar" class="page-title"><Avatar :src="r.page_avatar" :label="r.lang_label||r.page_code"/> <b>{{isForeignRefPage?(r.lang_label||r.page_code):r.page_code}}</b></div><div class="id">{{r.post_id}}</div><div v-if="currentCardConfig.dates" class="meta"><template v-if="isForeignRefPage">发帖：{{formatDate(r.post_time)}}　入库：{{formatDate(r.register_date)}}</template><template v-else>引流：{{formatDate(r.lead_date)}}　发帖：{{formatDate(r.post_time)}}</template></div><div v-if="currentCardConfig.gender && !isForeignRefPage" class="nums">{{genderRatio(r)}}</div><div v-if="currentCardConfig.metrics" class="nums"><template v-if="isForeignRefPage">引流量 {{r.leads}}</template><template v-else>引流 {{r.leads}} / 邀约 {{r.invites}} / 上线 {{r.online}} / 交教会 {{r.church}}</template></div><div v-if="currentCardConfig.engagement" class="nums">点赞 {{r.post_likes}} / 评论 {{r.post_comments}} / 分享 {{r.post_shares}}</div><div v-if="currentCardConfig.pageType" class="ptype">{{r.post_type}}</div><p v-if="currentCardConfig.summary">{{shortText(isForeignRefPage?(r.caption_zh||r.post_info_translation||r.caption_original||r.post_info):r.post_info)}}</p><div v-if="currentCardConfig.buttons" class="card-actions"><a :href="r.post_link" target="_blank">打开帖文</a><button @click="openDetail(r,idx)">查看详情</button></div></div></div></div>
 
     <!-- 详情：遮罩点击关闭；抽屉内上一条/下一条快速切换 -->
     <div v-if="detail" class="drawer-mask" @click="closeDetail"></div>
@@ -99,6 +108,7 @@
               <div v-if="isForeignRefPage"><label>语系</label><span>{{detail.lang_label||'—'}}</span></div>
               <div v-else><label>引流日</label><span>{{formatDate(detail.lead_date)||'—'}}</span></div>
               <div><label>发帖日</label><span>{{formatDate(detail.post_time)||'—'}}</span></div>
+              <div v-if="isForeignRefPage"><label>入库日</label><span>{{formatDate(detail.register_date)||'—'}}</span></div>
               <div v-if="!isForeignRefPage"><label>男女比</label><span>{{genderRatio(detail)}}</span></div>
               <div><label>类型</label><span>{{detail.post_type||'—'}}</span></div>
               <div class="full"><label>互动</label><span>赞 {{detail.post_likes??0}} · 评 {{detail.post_comments??0}} · 享 {{detail.post_shares??0}}</span></div>
@@ -120,7 +130,7 @@
       </div>
     </aside>
     <div v-if="showSettings" class="modal-mask"><div class="modal settings-modal"><h2>显示设置</h2><div class="modal-actions"><button @click="exportStyle">导出当前样式配置</button><label class="import-btn">导入样式配置<input type="file" accept="application/json" @change="importStyle" hidden/></label><button @click="restoreAdminDefault">恢复管理员默认设置</button><button @click="resetLocal">清除本浏览器样式</button><button @click="showSettings=false">关闭</button></div><div class="settings-grid"><section><h3>基础样式</h3><label>字体大小<input type="number" v-model.number="ui.fontSize"/></label><label>行高<input type="number" v-model.number="ui.rowHeight"/></label><label>图片大小<input type="number" v-model.number="ui.imageSize"/></label><label>摘要字数<input type="number" v-model.number="ui.textLimit"/></label><label>详情宽度<input type="number" v-model.number="ui.drawerWidth"/></label><label><input type="checkbox" v-model="ui.showGrid"/>显示表格线</label><label>表头背景<input type="color" v-model="ui.headerBg"/></label><label>表头文字<input type="color" v-model="ui.headerColor"/></label><label>普通文字<input type="color" v-model="ui.textColor"/></label><label>表格线<input type="color" v-model="ui.gridColor"/></label><label>隔行底色<input type="color" v-model="ui.stripeBg"/></label><label>悬停底色<input type="color" v-model="ui.hoverBg"/></label></section><section><h3>图片视图</h3><div class="card-config"><h4>横版</h4><label v-for="f in cardFieldOptions" :key="'l'+f.key"><input type="checkbox" v-model="ui.landscape[f.key]"/>{{f.label}}</label><label>比例<input v-model="ui.landscape.ratio"/></label></div><div class="card-config"><h4>竖版</h4><label v-for="f in cardFieldOptions" :key="'p'+f.key"><input type="checkbox" v-model="ui.portrait[f.key]"/>{{f.label}}</label><label>比例<input v-model="ui.portrait.ratio"/></label></div></section></div><section><h3>表格列设置（可拖动，也可用按钮）</h3><div class="column-settings"><div v-for="(c,i) in sortedAllColumns" :key="c.key" class="column-row" draggable="true" @dragstart="dragIndex=i" @dragover.prevent @drop="dropColumn(i)"><span class="drag">☰</span><input type="checkbox" v-model="c.visible"/><input class="label-input" v-model="c.label" placeholder="表头名"/><input type="number" v-model.number="c.width"/><select v-model="c.align"><option value="left">左</option><option value="center">中</option><option value="right">右</option></select><select v-model="c.displayMode"><option value="single">单行</option><option value="clip">截断</option><option value="wrap">换行</option><option value="lines">限制行数</option></select><input type="number" v-model.number="c.maxLines"/><label><input type="checkbox" v-model="c.detailOnly"/>只详情</label><button @click="moveColumn(i,-1)">上</button><button @click="moveColumn(i,1)">下</button><button @click="moveTop(i)">顶</button><button @click="moveBottom(i)">底</button></div></div></section><div class="modal-actions"><button @click="saveLocal();showSettings=false">保存到当前浏览器</button><button @click="showSettings=false">关闭</button></div></div></div>
-    <div v-if="showAdmin" class="modal-mask"><div class="modal admin-modal"><h2>管理中心</h2><div v-if="!adminToken"><input v-model="adminPassword" type="password" placeholder="管理员密码" @keyup.enter="loginAdmin"/><button @click="loginAdmin">登录管理中心</button></div><div v-else class="admin-actions"><button @click="runSync">立即同步全部数据</button><button @click="runSyncForeign">同步外语系参考</button><button @click="saveAdminUi">保存当前样式为管理员默认</button><button @click="clearSyncCache">清空同步缓存</button><button @click="loadLogs">刷新同步日志</button><button @click="showAdmin=false">关闭</button><h3>同步日志</h3><table class="admin-table"><tr><th>ID</th><th>状态</th><th>信息</th><th>开始</th><th>结束</th></tr><tr v-for="l in logs" :key="l.id"><td>{{l.id}}</td><td>{{l.status}}</td><td class="log-msg">{{l.message}}</td><td>{{l.started_at}}</td><td>{{l.finished_at}}</td></tr></table></div><div class="err">{{adminError}}</div></div></div>
+    <div v-if="showAdmin" class="modal-mask"><div class="modal admin-modal"><h2>管理中心</h2><div v-if="!adminToken"><input v-model="adminPassword" type="password" placeholder="管理员密码" @keyup.enter="loginAdmin"/><button @click="loginAdmin">登录管理中心</button></div><div v-else class="admin-actions"><button @click="runSync">立即同步全部数据</button><button @click="runSyncSummaries">同步帖文汇总</button><button @click="runSyncForeign">同步外语系参考</button><button @click="saveAdminUi">保存当前样式为管理员默认</button><button @click="clearSyncCache">清空同步缓存</button><button @click="loadLogs">刷新同步日志</button><button @click="showAdmin=false">关闭</button><h3>同步日志</h3><table class="admin-table"><tr><th>ID</th><th>状态</th><th>信息</th><th>开始</th><th>结束</th></tr><tr v-for="l in logs" :key="l.id"><td>{{l.id}}</td><td>{{l.status}}</td><td class="log-msg">{{l.message}}</td><td>{{l.started_at}}</td><td>{{l.finished_at}}</td></tr></table></div><div class="err">{{adminError}}</div></div></div>
   </template>
 </div>
 </template>
@@ -205,18 +215,19 @@ const foreignRefColumns=[
   {key:'caption_zh',label:'图片中文',type:'text',width:280,align:'left',order:5,visible:true,detailOnly:false,displayMode:'lines',maxLines:2},
   {key:'caption_original',label:'图片文案',type:'text',width:240,align:'left',order:6,visible:false,detailOnly:false,displayMode:'lines',maxLines:2},
   {key:'post_time',label:'发帖日',type:'date',width:100,align:'center',order:7,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
-  {key:'post_likes',label:'点赞',type:'number',width:80,align:'center',order:8,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
-  {key:'post_comments',label:'评论',type:'number',width:72,align:'center',order:9,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
-  {key:'post_shares',label:'分享',type:'number',width:72,align:'center',order:10,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
-  {key:'post_link',label:'链接',type:'link',width:52,align:'center',order:11,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
-  {key:'post_id',label:'ID',type:'text',width:200,align:'left',order:12,visible:false,detailOnly:false,displayMode:'single',maxLines:1}
+  {key:'register_date',label:'入库日期',type:'date',width:100,align:'center',order:8,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
+  {key:'post_likes',label:'点赞',type:'number',width:80,align:'center',order:9,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
+  {key:'post_comments',label:'评论',type:'number',width:72,align:'center',order:10,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
+  {key:'post_shares',label:'分享',type:'number',width:72,align:'center',order:11,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
+  {key:'post_link',label:'链接',type:'link',width:52,align:'center',order:12,visible:true,detailOnly:false,displayMode:'single',maxLines:1},
+  {key:'post_id',label:'ID',type:'text',width:200,align:'left',order:13,visible:false,detailOnly:false,displayMode:'single',maxLines:1}
 ]
 const actionCol={key:'action',width:72,align:'center'}
 const cardFieldOptions=[{key:'avatar',label:'专页头像'},{key:'dates',label:'日期'},{key:'gender',label:'男女比例'},{key:'metrics',label:'核心数据'},{key:'engagement',label:'互动数据'},{key:'pageType',label:'帖文类型'},{key:'summary',label:'帖文摘要'},{key:'buttons',label:'按钮'}]
 const ui=reactive({version:'v12',columnsLayoutVersion:COLUMNS_LAYOUT_VERSION,view:'table',fontSize:13,rowHeight:42,imageSize:72,textLimit:80,drawerWidth:520,showGrid:true,headerBg:'#f8fafc',headerColor:'#111827',textColor:'#111827',gridColor:'#e5e7eb',stripeBg:'#ffffff',hoverBg:'#eef6ff',globalMinLeads:2,adminMinLeads:{},genderMode:'count_percent',landscape:{ratio:'16/9',avatar:true,dates:true,gender:true,metrics:true,engagement:true,pageType:true,summary:true,buttons:true},portrait:{ratio:'9/16',avatar:true,dates:true,gender:true,metrics:true,engagement:false,pageType:true,summary:false,buttons:true},columns:[]})
 const filters=reactive({admin:'__all__',date_type:'lead',start_date:todayStr(),end_date:todayStr(),page_code:'',sort_by:'',sort_dir:'desc',min_leads:2,ref_lang:'',ref_post_type:'',ref_min_leads:0,ref_start_date:'',ref_end_date:''})
 // 日期、帖文ID 等无需悬停弹框的列
-const NO_TIP_KEYS=new Set(['lead_date','post_id','post_time'])
+const NO_TIP_KEYS=new Set(['lead_date','post_id','post_time','register_date'])
 const COPYABLE_KEYS=new Set(['post_ocr_translation','video_translation','caption_zh','caption_original'])
 const cellTip=reactive({show:false,text:'',x:0,y:0,copyable:false})
 const copyToast=ref('')
@@ -356,6 +367,22 @@ function parisYmdParts(){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'
 function todayStr(o=0){const d=new Date();d.setDate(d.getDate()-o);return makeYmd(d.getFullYear(),d.getMonth()+1,d.getDate())}
 function monthStartStr(){const d=new Date();d.setDate(1);return makeYmd(d.getFullYear(),d.getMonth()+1,d.getDate())}
 function ymd(d){return makeYmd(d.getFullYear(),d.getMonth()+1,d.getDate())}
+const refQuickMode=computed(()=>{
+  const s=filters.ref_start_date,e=filters.ref_end_date
+  if(!s&&!e)return 'all'
+  if(s===todayStr(0)&&e===todayStr(0))return 'today'
+  if(s===todayStr(1)&&e===todayStr(1))return 'yesterday'
+  if(s===todayStr(2)&&e===todayStr(2))return 'before'
+  if(s===todayStr(6)&&e===todayStr(0))return 'last7'
+  return 'custom'
+})
+const refSortMode=computed(()=>{
+  const dir=filters.sort_dir||'desc'
+  const by=filters.sort_by||'register_date'
+  if(dir!=='desc')return 'custom'
+  if(by==='leads'||by==='post_time'||by==='register_date'||by==='post_likes')return by
+  return 'custom'
+})
 function churchCycle(offset=0){const p=parisYmdParts();let sy,sm,ey,em;if(p.d>=23){sy=p.y;sm=p.m;const n=addMonthsYm(p.y,p.m,1);ey=n.y;em=n.m}else{const prev=addMonthsYm(p.y,p.m,-1);sy=prev.y;sm=prev.m;ey=p.y;em=p.m}if(offset){const s2=addMonthsYm(sy,sm,-offset);const e2=addMonthsYm(ey,em,-offset);sy=s2.y;sm=s2.m;ey=e2.y;em=e2.m}return {start:makeYmd(sy,sm,23),end:makeYmd(ey,em,22)}}
 function setChurchCycle(offset=0,mode='church_current'){const c=churchCycle(offset);filters.start_date=c.start;filters.end_date=c.end;quickMode.value=mode;saveLocal();loadData()}
 function headers(extra={}){return {'Content-Type':'application/json','X-User-Token':userToken.value,'X-Admin-Token':adminToken.value,...extra}}
@@ -383,7 +410,10 @@ function setRefLang(lang){
   loadRefMeta().then(()=>{if(!isQueryPage.value)loadData()})
 }
 function onRefDateChange(){scheduleFilterLoad()}
+function quickRefDay(o){const d=todayStr(o);filters.ref_start_date=d;filters.ref_end_date=d;saveLocal();loadData()}
+function quickRefLast7(){filters.ref_start_date=todayStr(6);filters.ref_end_date=todayStr(0);saveLocal();loadData()}
 function clearRefDates(){filters.ref_start_date='';filters.ref_end_date='';saveLocal();loadData()}
+function setRefSort(by){filters.sort_by=by;filters.sort_dir='desc';saveLocal();loadData()}
 async function loadUi(){const remote=await api('/api/settings/ui');Object.assign(ui,remote);normalizeUi();setMinLeadsByAdmin()}
 function normalizeUi(){
   const hiddenColumnKeys=new Set(['answers','gained','male','female'])
@@ -415,7 +445,7 @@ function normalizeUi(){
 function setMinLeadsByAdmin(){filters.min_leads=filters.admin!=='__all__'?(ui.adminMinLeads?.[filters.admin]??ui.globalMinLeads):ui.globalMinLeads}
 async function loadAdmins(){admins.value=await api('/api/admins')} async function loadPages(){pages.value=await api('/api/pages?admin='+encodeURIComponent(filters.admin))}
 function setAdmin(a){filters.admin=a;filters.page_code='';setMinLeadsByAdmin();saveLocal();loadPages().then(()=>{if(isQueryPage.value){if(queryText.value.trim())runQuery()}else loadData()})}
-function setPage(p){activePage.value=p;rows.value=[];total.value=0;closeDetail();filters.page_code='';queryStats.raw=0;queryStats.recognized=0;queryStats.returned=0;queryStats.unmatched=0;unmatchedList.value=[];error.value='';if(QUERY_PAGE_KEYS.has(p)){saveLocal();return}if(p==='foreignRef'){filters.sort_by='leads';filters.sort_dir='desc';saveLocal();loadRefMeta().then(()=>loadData());return}if(p==='church'){filters.sort_by='church';setChurchCycle(0,'church_current');return}else{filters.start_date=todayStr();filters.end_date=todayStr();quickMode.value='today';if(p==='posts')filters.date_type='lead';if(p==='invitesOverview'||p==='onlineOverview')filters.date_type='invite';if(p==='leads')filters.sort_by='leads';if(p==='invitesOverview')filters.sort_by='invites';if(p==='onlineOverview')filters.sort_by='online'} saveLocal();loadData()}
+function setPage(p){activePage.value=p;rows.value=[];total.value=0;closeDetail();filters.page_code='';queryStats.raw=0;queryStats.recognized=0;queryStats.returned=0;queryStats.unmatched=0;unmatchedList.value=[];error.value='';if(QUERY_PAGE_KEYS.has(p)){saveLocal();return}if(p==='foreignRef'){filters.sort_by='register_date';filters.sort_dir='desc';saveLocal();loadRefMeta().then(()=>loadData());return}if(p==='church'){filters.sort_by='church';setChurchCycle(0,'church_current');return}else{filters.start_date=todayStr();filters.end_date=todayStr();quickMode.value='today';if(p==='posts')filters.date_type='lead';if(p==='invitesOverview'||p==='onlineOverview')filters.date_type='invite';if(p==='leads')filters.sort_by='leads';if(p==='invitesOverview')filters.sort_by='invites';if(p==='onlineOverview')filters.sort_by='online'} saveLocal();loadData()}
 function quickDay(o){filters.start_date=todayStr(o);filters.end_date=todayStr(o);quickMode.value=o===0?'today':o===1?'yesterday':'before';saveLocal();loadData()}
 function onDateInputChange(){quickMode.value='custom';scheduleFilterLoad()}
 let filterLoadTimer=null
@@ -441,15 +471,28 @@ async function copyText(text,okMsg){
     return true
   }
 }
+function absoluteUrl(url){
+  const s=String(url||'').trim()
+  if(!s)return ''
+  if(/^https?:\/\//i.test(s))return s
+  try{return new URL(s, window.location.href).href}catch{return s}
+}
+function sheetImageFormula(url){
+  const src=absoluteUrl(url)
+  if(!src)return ''
+  return `=IMAGE("${src.replace(/"/g,'')}")`
+}
 function copyCellValue(row,col){
-  if(col.type==='image')return imageOf(row)||''
-  if(col.type==='avatar')return row.page_avatar||''
+  if(col.type==='image')return sheetImageFormula(imageOf(row))
+  if(col.type==='avatar')return sheetImageFormula(row.page_avatar)
   if(col.type==='link')return row[col.key]||''
   const v=formatCell(row,col)
   return v==null?'':String(v)
 }
 function tsvCell(s){
   const t=String(s??'')
+  // IMAGE 公式需原样粘贴到表格，不能再套一层 TSV 引号，否则会变成文本而不是公式
+  if(t.startsWith('=IMAGE('))return t
   if(/[\t\n\r"]/.test(t))return '"'+t.replace(/"/g,'""')+'"'
   return t
 }
@@ -462,7 +505,7 @@ async function copyCurrentResults(){
   return copyText([header,...lines].join('\n'),'已复制 '+rows.value.length+' 条')
 }
 async function copyUnmatched(){return copyText(unmatchedList.value.join('\n'),'已复制 '+unmatchedList.value.length+' 条未命中')}
-async function loadData(){if(isQueryPage.value){if(queryText.value.trim())return runQuery();rows.value=[];total.value=0;unmatchedList.value=[];return}loading.value=true;error.value='';try{if(activePage.value==='foreignRef'){const p=new URLSearchParams();if(filters.ref_lang)p.set('lang',filters.ref_lang);if(filters.ref_post_type)p.set('post_type',filters.ref_post_type);p.set('min_leads',String(Number(filters.ref_min_leads)||0));if(filters.ref_start_date)p.set('start_date',filters.ref_start_date);if(filters.ref_end_date)p.set('end_date',filters.ref_end_date);p.set('sort_by',filters.sort_by||'leads');p.set('sort_dir',filters.sort_dir||'desc');p.set('limit','1000');const d=await api('/api/reference/posts?'+p.toString());rows.value=Array.isArray(d.rows)?d.rows:[];total.value=Number(d.total||0);saveLocal();return}const p=new URLSearchParams();p.set('admin',filters.admin); if(filters.page_code)p.set('page_code',filters.page_code); if(filters.start_date)p.set('start_date',filters.start_date); if(filters.end_date)p.set('end_date',filters.end_date); if(activePage.value==='posts'||activePage.value==='leads'){p.set('min_leads',String(Number(filters.min_leads)||0))}else{p.set('min_leads','0')} p.set('limit','1000'); let url='/api/posts?'; if(activePage.value==='church'){p.set('project','church');p.set('mode','all');p.set('sort_by',filters.sort_by||'church');p.set('sort_dir',filters.sort_dir||'desc');url='/api/project-posts?'} else if(activePage.value==='leads'){p.set('metric','leads');if(filters.sort_by)p.set('sort_by',filters.sort_by);p.set('sort_dir',filters.sort_dir||'desc');url='/api/ranking?'} else if(activePage.value==='invitesOverview'||activePage.value==='onlineOverview'){p.set('metric',activePage.value==='invitesOverview'?'invites':'online');p.set('date_type',filters.date_type||'invite');if(filters.sort_by)p.set('sort_by',filters.sort_by);p.set('sort_dir',filters.sort_dir||'desc');url='/api/overview?'} else {p.set('date_type',filters.date_type); if(filters.sort_by)p.set('sort_by',filters.sort_by); p.set('sort_dir',filters.sort_dir||'desc');url='/api/posts?'} const d=await api(url+p.toString());rows.value=Array.isArray(d.rows)?d.rows:[];total.value=Number(d.total||0);saveLocal()}catch(e){console.error('loadData failed',e);rows.value=[];total.value=0;error.value='数据加载失败：'+(e.message||e)}finally{loading.value=false}}
+async function loadData(){if(isQueryPage.value){if(queryText.value.trim())return runQuery();rows.value=[];total.value=0;unmatchedList.value=[];return}loading.value=true;error.value='';try{if(activePage.value==='foreignRef'){const p=new URLSearchParams();if(filters.ref_lang)p.set('lang',filters.ref_lang);if(filters.ref_post_type)p.set('post_type',filters.ref_post_type);p.set('min_leads',String(Number(filters.ref_min_leads)||0));if(filters.ref_start_date)p.set('start_date',filters.ref_start_date);if(filters.ref_end_date)p.set('end_date',filters.ref_end_date);p.set('sort_by',filters.sort_by||'register_date');p.set('sort_dir',filters.sort_dir||'desc');p.set('limit','1000');const d=await api('/api/reference/posts?'+p.toString());rows.value=Array.isArray(d.rows)?d.rows:[];total.value=Number(d.total||0);saveLocal();return}const p=new URLSearchParams();p.set('admin',filters.admin); if(filters.page_code)p.set('page_code',filters.page_code); if(filters.start_date)p.set('start_date',filters.start_date); if(filters.end_date)p.set('end_date',filters.end_date); if(activePage.value==='posts'||activePage.value==='leads'){p.set('min_leads',String(Number(filters.min_leads)||0))}else{p.set('min_leads','0')} p.set('limit','1000'); let url='/api/posts?'; if(activePage.value==='church'){p.set('project','church');p.set('mode','all');p.set('sort_by',filters.sort_by||'church');p.set('sort_dir',filters.sort_dir||'desc');url='/api/project-posts?'} else if(activePage.value==='leads'){p.set('metric','leads');if(filters.sort_by)p.set('sort_by',filters.sort_by);p.set('sort_dir',filters.sort_dir||'desc');url='/api/ranking?'} else if(activePage.value==='invitesOverview'||activePage.value==='onlineOverview'){p.set('metric',activePage.value==='invitesOverview'?'invites':'online');p.set('date_type',filters.date_type||'invite');if(filters.sort_by)p.set('sort_by',filters.sort_by);p.set('sort_dir',filters.sort_dir||'desc');url='/api/overview?'} else {p.set('date_type',filters.date_type); if(filters.sort_by)p.set('sort_by',filters.sort_by); p.set('sort_dir',filters.sort_dir||'desc');url='/api/posts?'} const d=await api(url+p.toString());rows.value=Array.isArray(d.rows)?d.rows:[];total.value=Number(d.total||0);saveLocal()}catch(e){console.error('loadData failed',e);rows.value=[];total.value=0;error.value='数据加载失败：'+(e.message||e)}finally{loading.value=false}}
 function saveLocal(){normalizeUi();localStorage.setItem(LOCAL_KEY,JSON.stringify({ui:JSON.parse(JSON.stringify(ui)),filters:JSON.parse(JSON.stringify(filters)),activePage:activePage.value,queryText:queryText.value}))}
 let saveTimer=null
 function saveLocalDebounced(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>saveLocal(),500)}
@@ -478,7 +521,7 @@ function pct(n,d){return d?Math.round(n*100/d)+'%':'0%'}
 function genderRatio(row){const m=Number(row.male)||0,f=Number(row.female)||0,t=m+f;return `男 ${pct(m,t)} / 女 ${pct(f,t)}`}
 function formatCell(row,col){if(col.type==='gender_ratio')return genderRatio(row);if(col.type==='date')return formatDate(row[col.key]);return row[col.key]??''}
 const SORTABLE_COLUMNS={leads:'leads',invites:'invites',online:'online',church:'church',post_likes:'post_likes',post_comments:'post_comments',post_shares:'post_shares'}
-const FOREIGN_REF_SORTABLE=new Set(['leads','post_likes','post_comments','post_shares','post_time','post_type','lang_label'])
+const FOREIGN_REF_SORTABLE=new Set(['leads','post_likes','post_comments','post_shares','post_time','register_date','post_type','lang_label'])
 function sortKeyOf(c){if(isForeignRefPage.value)return FOREIGN_REF_SORTABLE.has(c.key)?c.key:'';return SORTABLE_COLUMNS[c.key]||''}
 function isSortableColumn(c){return !!sortKeyOf(c)}
 function sortByColumn(c){const k=sortKeyOf(c);if(!k)return;if(filters.sort_by===k){filters.sort_dir=filters.sort_dir==='asc'?'desc':'asc'}else{filters.sort_by=k;filters.sort_dir='desc'}saveLocal();loadData()}
@@ -531,6 +574,7 @@ async function importStyle(e){const f=e.target.files?.[0];if(!f)return;const txt
 async function loginAdmin(){adminError.value='';try{const r=await fetch('/api/auth/admin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:adminPassword.value})});if(!r.ok)throw new Error('管理员密码错误');const d=await r.json();adminToken.value=d.token;localStorage.setItem(ADMIN_KEY,d.token);await loadLogs()}catch(e){adminError.value=e.message}}
 async function runSync(){adminError.value='正在同步，请等待...';try{const d=await api('/api/sync/run',{method:'POST'});adminError.value=d.message||'同步完成';await loadAdmins();await loadPages();if(isForeignRefPage.value)await loadRefMeta();await loadData();await loadLogs()}catch(e){adminError.value=e.message}}
 async function runSyncForeign(){adminError.value='正在同步外语系参考，请等待...';try{const d=await api('/api/sync/run/foreign',{method:'POST'});adminError.value=d.message||'同步完成';if(isForeignRefPage.value)await loadRefMeta();await loadData();await loadLogs()}catch(e){adminError.value=e.message}}
+async function runSyncSummaries(){adminError.value='正在同步帖文汇总，请等待...';try{const d=await api('/api/sync/run/summaries',{method:'POST'});adminError.value=d.message||'同步完成';await loadData();await loadLogs()}catch(e){adminError.value=e.message}}
 async function loadLogs(){logs.value=await api('/api/sync/logs')}
 let logPollTimer=null
 watch([showAdmin,adminToken],([open,token])=>{

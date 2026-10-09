@@ -2,3 +2,4 @@ _dev/
 .env
 secrets/*
 bin/
+frontend/node_modules
